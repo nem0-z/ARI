@@ -15,8 +15,9 @@ import (
 var (
 	log = log15.New()
 
-	bridges  = make(map[string]*ari.BridgeHandle) //Map bridgeID to the bridge itself
-	channels = make(map[string]string)            //Map channelID to the endpoint
+	bridges   = make(map[string]*ari.BridgeHandle) //Map bridgeID to the bridge itself
+	callTypes = make(map[string]string)            //Map bridgeID to the call type (call, conference)
+	channels  = make(map[string]string)            //Map channelID to the endpoint
 )
 
 func main() {
@@ -43,7 +44,7 @@ func main() {
 			if err := JoinBridge(cl, args[0], args[1]); err != nil {
 				log.Error("failed to join bridge", "error", err)
 			}
-			//TODO: case when we Join 2-person call, make sure that Dialer knows it "became" a conference
+			updateCallType(args[0])
 		case "ListCalls":
 			ListCalls()
 		default:
@@ -51,6 +52,15 @@ func main() {
 		}
 	}
 
+}
+
+func updateCallType(bridgeID string) {
+	bridge := bridges[bridgeID]
+	bridgeData, _ := bridge.Data()
+
+	if len(bridgeData.ChannelIDs) > 2 {
+		callTypes[bridge.ID()] = "conference"
+	}
 }
 
 func ListCalls() {
@@ -70,10 +80,17 @@ func ListCalls() {
 }
 
 func Dialer(cl ari.Client, args []string) {
+	var callType string
+
 	if len(args) < 2 {
 		log.Warn("at least two endpoints required")
 	} else {
-		bridge := createBridge(cl)
+		if len(args) == 2 {
+			callType = "call"
+		} else {
+			callType = "conference"
+		}
+		bridge := createBridge(cl, callType)
 		if bridge == nil {
 			log.Error("failed to create bridge")
 			return
@@ -83,7 +100,7 @@ func Dialer(cl ari.Client, args []string) {
 			log.Error("failed to add endpoints", "error", err)
 		}
 
-		if len(args) == 2 {
+		if callTypes[bridge.ID()] == "call" {
 			go manageCall(cl, bridge)
 		}
 	}
@@ -102,6 +119,9 @@ func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
 		log.Error("failed to delete bridge", "error", err)
 	}
 	delete(bridges, bridge.ID())
+
+	//TODO: make sure that the other participant gets kicked out of the call
+	//Should I destroy the channels?
 }
 
 func JoinBridge(cl ari.Client, bridgeID string, ext string) error {
@@ -160,7 +180,7 @@ func createChannel(cl ari.Client, ext string) (*ari.ChannelHandle, error) {
 	return channel, nil
 }
 
-func createBridge(cl ari.Client) *ari.BridgeHandle {
+func createBridge(cl ari.Client, callType string) *ari.BridgeHandle {
 	bridge, err := cl.Bridge().Create(&ari.Key{}, "mixing", "")
 	if err != nil {
 		log.Error("failed to create bridge", "error", err)
@@ -168,6 +188,7 @@ func createBridge(cl ari.Client) *ari.BridgeHandle {
 	}
 
 	bridges[bridge.ID()] = bridge
+	callTypes[bridge.ID()] = callType
 	return bridge
 }
 
