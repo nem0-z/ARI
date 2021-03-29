@@ -10,7 +10,6 @@ import (
 	"github.com/CyCoreSystems/ari/v5"
 	"github.com/CyCoreSystems/ari/v5/client/native"
 	"github.com/CyCoreSystems/ari/v5/ext/play"
-	"github.com/CyCoreSystems/ari/v5/rid"
 )
 
 var log = log15.New()
@@ -86,8 +85,8 @@ func ensureBridge(ctx context.Context, cl ari.Client, src *ari.Key) (err error) 
 		return nil
 	}
 
-	key := src.New(ari.BridgeKey, rid.New(rid.Bridge))
-	bridge, err = cl.Bridge().Create(key, "mixing", key.ID)
+	//key := src.New(ari.BridgeKey, rid.New(rid.Bridge))
+	bridge, err = cl.Bridge().Create(&ari.Key{}, "mixing", "")
 	if err != nil {
 		bridge = nil
 		return eris.Wrap(err, "failed to create bridge")

@@ -41,7 +41,6 @@ func main() {
 		select {
 		case e := <-sub.Events():
 			v := e.(*ari.StasisStart)
-			log.Info("Got stasis start", "channel", v.Channel.ID)
 			go app(ctx, cl, cl.Channel().Get(v.Key(ari.ChannelKey, v.Channel.ID)))
 		case <-ctx.Done():
 			return

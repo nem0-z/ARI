@@ -2,28 +2,23 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"errors"
 	"os"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/CyCoreSystems/ari/v5"
 	"github.com/CyCoreSystems/ari/v5/client/native"
-	"github.com/CyCoreSystems/ari/v5/ext/play"
-	"github.com/CyCoreSystems/ari/v5/rid"
 	"github.com/inconshreveable/log15"
 )
 
-var log = log15.New()
+var (
+	log = log15.New()
 
-var bridge *ari.BridgeHandle
+	bridges  = make(map[string]*ari.BridgeHandle) //Map bridgeID to the bridge itself
+	channels = make(map[string]string)            //Map channelID to the endpoint
+)
 
 func main() {
-	//Create a context and defer the cancelling until we are done with everything
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	//Connect to ARI
 	cl, err := native.Connect(&native.Options{
 		Application:  "ari-app",
@@ -35,102 +30,103 @@ func main() {
 	if err != nil {
 		log.Error("Failed to connect to ARI", "error", err)
 	}
-
-	//Subscribe to StasisStart event
-	sub := cl.Bus().Subscribe(nil, "StasisStart")
+	log.Info("Connected to ARI")
 
 	for {
-		select {
-		//Case StasisStart
-		case e := <-sub.Events():
-			v := e.(*ari.StasisStart)
-			log.Info("StasisStart", "channel", v.Channel.ID)
-			//Start the app as a go routine
-			go app(ctx, cl, cl.Channel().Get(v.Key(ari.ChannelKey, v.Channel.ID)))
-		case <-ctx.Done():
-			//End everything once the context is done
-			return
+		log.Info("Enter your choice: ")
+		action, args := readInput()
+		switch action {
+		case "Dial":
+			if len(args) < 2 {
+				log.Error("at least two endpoints required")
+			} else {
+				bridge := createBridge(cl)
+
+				for _, ch := range args {
+					call(cl, bridge, ch)
+				}
+				if len(args) == 2 {
+					//call between two endpoints
+				} else {
+					//conference
+				}
+			}
+		case "JoinCall":
+			//todo - first arg will be bridgeid of bridge to be added to, second id is endpoint
+			channel := createChannel(cl, args[1])
+			if channel == nil {
+				return
+			}
+			bridge := bridges[args[0]]
+			if bridge == nil {
+				log.Error("this bridge does not exist")
+			} else {
+				bridge.AddChannel(channel.ID())
+			}
+		case "ListCalls":
+			for _, bridge := range bridges {
+				bridgeData, _ := bridge.Data()
+				log.Info("Call data: ")
+				for _, channelID := range bridgeData.ChannelIDs {
+					log.Info("Channel ID: ", "channelID", channels[channelID])
+				}
+			}
+		default:
+			log.Error("bad choice")
 		}
 	}
+
 }
 
-func app(ctx context.Context, cl ari.Client, h *ari.ChannelHandle) {
-	log.Info("App started", "channel", h.Key().ID)
-
-	//Answer the call
-	if err := h.Answer(); err != nil {
-		log.Error("failed to answer", "error", err)
+func call(cl ari.Client, bridge *ari.BridgeHandle, ch string) {
+	channel := createChannel(cl, ch)
+	if channel == nil {
 		return
 	}
-	play.Play(ctx, h, play.URI("sound:hello-world"))
 
-	for {
-		reader := bufio.NewReader(os.Stdin)
-		text, _ := reader.ReadString('\n')
-		input := strings.Fields(strings.Replace(text, "\n", "", -1))
+	if err := channel.Dial("ARI", 15*time.Second); err != nil {
+		log.Error("call failed", "error", err)
+	}
 
-		//Parse input and forward those arguments to create/manage bridge functions
-		if err := createBridge(ctx, cl, h.Key()); err != nil {
-			log.Error("failed to create bridge", "error", err)
-		}
+	if err := bridge.AddChannel(channel.ID()); err != nil {
+		log.Error("add channel failed", "error", err)
 	}
 }
 
-func createBridge(ctx context.Context, cl ari.Client, src *ari.Key) error {
-	if bridge != nil {
-		//Bridge already exists, no need to create anything
+func createChannel(cl ari.Client, endpoint string) *ari.ChannelHandle {
+	//Create new channel
+	channel, err := cl.Channel().Create(&ari.Key{}, ari.ChannelCreateRequest{
+		Endpoint: "PJSIP/" + endpoint,
+		App:      "ari-app",
+	})
+	if err != nil {
+		log.Error("failed to create channel", "error", err)
 		return nil
 	}
 
-	key := src.New(ari.BridgeKey, rid.New(rid.Bridge))
-	bridge, err := cl.Bridge().Create(key, "mixing", key.ID)
+	//Add to an existing map of channels and return to caller
+	channels[channel.ID()] = "PJSIP" + endpoint
+	return channel
+}
+
+func createBridge(cl ari.Client) *ari.BridgeHandle {
+	//Create a new bridge handle
+	bridge, err := cl.Bridge().Create(&ari.Key{}, "mixing", "")
+
 	if err != nil {
-		bridge = nil
-		return errors.New("failed to create bridge")
+		log.Error("failed to create bridge", "error", err)
+		return nil
 	}
 
-	wg := new(sync.WaitGroup)
-	wg.Add(1)
-	go manageBridge(ctx, bridge, wg)
-	wg.Wait()
-
-	return nil
+	//Add to an existing map of bridges and return to caller
+	bridges[bridge.ID()] = bridge
+	return bridge
 }
 
-func manageBridge(ctx context.Context, bridge *ari.BridgeHandle, wg *sync.WaitGroup) {
-	//Delete the bridge once we are done
-	defer bridge.Delete()
-
-	bridgeDestroy := bridge.Subscribe(ari.Events.BridgeDestroyed)
-	defer bridgeDestroy.Cancel()
-
-	bridgeEnter := bridge.Subscribe(ari.Events.ChannelEnteredBridge)
-	defer bridgeEnter.Cancel()
-
-	bridgeLeave := bridge.Subscribe(ari.Events.ChannelLeftBridge)
-	defer bridgeLeave.Cancel()
-
-	wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-bridgeDestroy.Events():
-			return
-		case e := <-bridgeEnter.Events():
-			v := e.(*ari.ChannelEnteredBridge)
-			log.Debug("channel left bridge", "channel", v.Channel.Name)
-			go playSound(ctx, bridge, "sound:confbridge-join")
-			return
-		case e := <-bridgeLeave.Events():
-			v := e.(*ari.ChannelLeftBridge)
-			log.Debug("channel left bridge", "channel", v.Channel.Name)
-			go playSound(ctx, bridge, "sound:confbridge-leave")
-			return
-		}
-	}
-}
-
-func playSound(ctx context.Context, bridge *ari.BridgeHandle, sound string) {
-	play.Play(ctx, bridge, play.URI(sound))
+func readInput() (string, []string) {
+	reader := bufio.NewReader(os.Stdin)
+	text, _ := reader.ReadString('\n')
+	arr := strings.Fields(strings.Replace(text, "\n", "", -1))
+	return arr[0], arr[1:]
+	// return "Dial", []string{"5000", "5001"} //Testing
 }
