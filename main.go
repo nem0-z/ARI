@@ -41,7 +41,7 @@ func main() {
 		case "Dial":
 			Dialer(cl, args)
 		case "JoinCall":
-			if err := JoinBridge(cl, args[0], args[1]); err != nil {
+			if err := JoinBridge(cl, args[0], args[1:]); err != nil {
 				log.Error("failed to join bridge", "error", err)
 			}
 			updateCallType(args[0])
@@ -120,22 +120,23 @@ func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
 	}
 	delete(bridges, bridge.ID())
 	delete(callTypes, bridge.ID())
-
 	//TODO: make sure that the other participant gets kicked out of the call
 	//Should I destroy the channels?
 }
 
-func JoinBridge(cl ari.Client, bridgeID string, ext string) error {
+func JoinBridge(cl ari.Client, bridgeID string, ext []string) error {
 	bridge := bridges[bridgeID]
 	if bridge == nil {
 		return errors.New("this bridge does not exist")
 	}
 
-	if err := originate(cl, bridge, ext); err != nil {
-		return err
+	for _, e := range ext {
+		if err := originate(cl, bridge, e); err != nil {
+			return err
+		}
+		log.Debug("joining bridge successful", "extension", e)
 	}
 
-	log.Debug("joining bridge successful")
 	return nil
 }
 
