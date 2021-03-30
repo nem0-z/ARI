@@ -37,7 +37,6 @@ func main() {
 	log.Info("Connected to ARI")
 
 	for {
-		log.Info("Enter your choice: ")
 		action, args := readInput()
 		switch action {
 		case "Dial":
@@ -47,10 +46,9 @@ func main() {
 				log.Error("failed to join bridge", "error", err)
 				continue
 			}
-			updateCallType(args[0])
+			safeUpdateCallType(args[0])
 		case "ListCalls":
 			ListCalls()
-			//ListChannels()
 		default:
 			log.Error("bad choice")
 		}
@@ -58,63 +56,7 @@ func main() {
 
 }
 
-func ListChannels() {
-	log.Debug("CHANNELS INFO")
-	for chanID, _ := range channels {
-		log.Debug("channel", "channelID", chanID)
-	}
-}
-
-func getChannelsFromBridge(bridgeID string) []string {
-	bridge := bridges[bridgeID]
-	if bridge == nil {
-		log.Error("no bridge")
-		return nil
-	}
-	bridgeData, _ := bridge.Data()
-	return bridgeData.ChannelIDs
-}
-
-func getCallType(bridgeID string) string {
-	mu.Lock()
-	defer mu.Unlock()
-
-	return callTypes[bridgeID]
-}
-
-func updateCallType(bridgeID string) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(getChannelsFromBridge(bridgeID)) > 2 {
-		callTypes[bridgeID] = "conference"
-	}
-}
-
-func ListCalls() {
-	if len(bridges) == 0 {
-		log.Warn("No active calls")
-		return
-	}
-
-	for _, bridge := range bridges {
-		channels := getChannelsFromBridge(bridge.ID())
-		log.Info("CALL DATA", "bridge ID", bridge.ID(), "call type", callTypes[bridge.ID()])
-		for _, channelID := range channels {
-			//I like nested for loops what you gonna do?
-			log.Info("Channel info", "endpoint", chanEndpoints[channelID], "channel ID", channelID)
-		}
-	}
-}
-
-func destroyRemainingChannels(bridge *ari.BridgeHandle) {
-	for _, chanID := range getChannelsFromBridge(bridge.ID()) {
-		if err := channels[chanID].Hangup(); err != nil {
-			log.Error("failed to destroy the channel", "error", err)
-		}
-	}
-}
-
+//Creates the bridge, adds endpoints and starts a go routine that manages the call
 func Dialer(cl ari.Client, args []string) {
 
 	if len(args) < 2 {
@@ -134,6 +76,7 @@ func Dialer(cl ari.Client, args []string) {
 	}
 }
 
+//Deletes channels whenever they leave the bridge. In addition to that, destroys the bridge if it's free.
 func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
 	sub := bridge.Subscribe(ari.Events.ChannelLeftBridge)
 
@@ -146,53 +89,57 @@ func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
 			log.Error("failed to play leave sound", "error", err)
 		}
 
-		delete(channels, channelID)
-		delete(chanEndpoints, channelID)
-		log.Debug("destroying channel", "channelID", channelID)
+		deleteChannelFromMaps(channelID)
 
-		numberOfChannels := len(getChannelsFromBridge(bridge.ID()))
-		callType := getCallType(bridge.ID())
+		chans, err := getChannelsFromBridge(bridge.ID())
+		if err != nil {
+			log.Error("failed to access bridge", "error", err, "bridgeID", bridge.ID())
+			return
+		}
+
+		numberOfChannels := len(chans)
+		callType := safeGetCallType(bridge.ID())
 
 		if callType == "call" || numberOfChannels < 2 {
-			go destroyRemainingChannels(bridge)
+			destroyRemainingChannels(bridge)
 
 			if err := bridge.Delete(); err != nil {
 				log.Error("failed to delete bridge", "error", err)
 			}
 			log.Debug("destroying bridge")
 
-			delete(bridges, bridge.ID())
-			delete(callTypes, bridge.ID())
+			deleteBridgeFromMaps(bridge.ID())
 			return
 		}
 	}
 }
 
+//Originates a channel and call for each of the extensions and adds them to the bridge.
+func addEndpoints(cl ari.Client, bridge *ari.BridgeHandle, exts []string) error {
+	for _, ext := range exts {
+		if err := originate(cl, bridge, ext); err != nil {
+			return err
+		}
+		log.Debug("joining bridge successful", "extension", ext)
+	}
+	return nil
+}
+
+//Wrapper for addEndpoints that uses bridgeID as an identifier instead of bridge handle itself.
 func JoinBridge(cl ari.Client, bridgeID string, ext []string) error {
 	bridge := bridges[bridgeID]
 	if bridge == nil {
 		return errors.New("this bridge does not exist")
 	}
 
-	for _, e := range ext {
-		if err := originate(cl, bridge, e); err != nil {
-			return err
-		}
-		log.Debug("joining bridge successful", "extension", e)
+	if err := addEndpoints(cl, bridge, ext); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func addEndpoints(cl ari.Client, bridge *ari.BridgeHandle, exts []string) error {
-	for _, ext := range exts {
-		if err := originate(cl, bridge, ext); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
+//Creates a channel, dials it and adds it to the bridge.
 func originate(cl ari.Client, bridge *ari.BridgeHandle, ch string) error {
 	channel, err := createChannel(cl, ch)
 	if err != nil {
@@ -213,6 +160,7 @@ func originate(cl ari.Client, bridge *ari.BridgeHandle, ch string) error {
 	return nil
 }
 
+//Creates a channel for the PJSIP/ext endpoint, adds it to the internal maps and returns a channel handle.
 func createChannel(cl ari.Client, ext string) (*ari.ChannelHandle, error) {
 	channel, err := cl.Channel().Create(&ari.Key{}, ari.ChannelCreateRequest{
 		Endpoint: "PJSIP/" + ext,
@@ -227,6 +175,7 @@ func createChannel(cl ari.Client, ext string) (*ari.ChannelHandle, error) {
 	return channel, nil
 }
 
+//Creates a bridge, adds it to the internal maps and defines the initial call type in the bridge.
 func createBridge(cl ari.Client, numberOfChannels int) *ari.BridgeHandle {
 	var callType string
 
@@ -247,7 +196,97 @@ func createBridge(cl ari.Client, numberOfChannels int) *ari.BridgeHandle {
 	return bridge
 }
 
+//Cleans up channels from the bridge that is about to be destroyed.
+func destroyRemainingChannels(bridge *ari.BridgeHandle) {
+	chans, err := getChannelsFromBridge(bridge.ID())
+	if err != nil {
+		log.Error("failed to access bridge", "error", err, "bridgeID", bridge.ID())
+	}
+
+	for _, chanID := range chans {
+		if err := channels[chanID].Hangup(); err != nil {
+			log.Error("failed to destroy the channel", "error", err)
+		}
+		log.Debug("channel destroyed", "chanID", chanID)
+	}
+}
+
+//Deletes channel identified by channelID from the internal maps.
+func deleteChannelFromMaps(channelID string) {
+	delete(channels, channelID)
+	delete(chanEndpoints, channelID)
+}
+
+//Deletes bridge identified by bridgeID from the internal maps.
+func deleteBridgeFromMaps(bridgeID string) {
+	delete(bridges, bridgeID)
+	delete(callTypes, bridgeID)
+}
+
+//Returns array of channel ids from the bridge identified by bridgeID.
+func getChannelsFromBridge(bridgeID string) ([]string, error) {
+	bridge := bridges[bridgeID]
+	if bridge == nil {
+		return nil, errors.New("non existing bridge")
+	}
+	bridgeData, err := bridge.Data()
+	if err != nil {
+		return nil, errors.New("could not fetch bridge data")
+	}
+	return bridgeData.ChannelIDs, nil
+}
+
+//Returns call type for the bridge identified by bridgeID. Locks the access during the reading.
+func safeGetCallType(bridgeID string) string {
+	mu.Lock()
+	defer mu.Unlock()
+
+	return callTypes[bridgeID]
+}
+
+//Updates call type for the bridge identified by bridgeID. Locks the access during the update.
+func safeUpdateCallType(bridgeID string) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	chans, err := getChannelsFromBridge(bridgeID)
+	if err != nil {
+		log.Error("failed to access bridge", "error", err, "bridgeID", bridgeID)
+		return
+	}
+
+	if len(chans) > 2 {
+		callTypes[bridgeID] = "conference"
+	}
+}
+
+//Prints out basic info about channels in the array.
+func printChannels(bridgeID string, chans []string) {
+	log.Info("CALL DATA", "bridge ID", bridgeID, "call type", callTypes[bridgeID])
+	for _, channelID := range chans {
+		log.Info("Channel info", "endpoint", chanEndpoints[channelID], "channel ID", channelID)
+	}
+}
+
+//Prints out basic info about all of the active bridges/calls.
+func ListCalls() {
+	if len(bridges) == 0 {
+		log.Warn("No active calls")
+		return
+	}
+
+	for _, bridge := range bridges {
+		chans, err := getChannelsFromBridge(bridge.ID())
+		if err != nil {
+			log.Error("failed to access bridge", "error", err, "bridgeID", bridge.ID())
+		}
+		printChannels(bridge.ID(), chans)
+	}
+}
+
+//Prompts user for a console input and returns it in a form of action and array of arguments.
 func readInput() (action string, args []string) {
+	log.Info("Enter your choice: ")
 	reader := bufio.NewReader(os.Stdin)
 	text, _ := reader.ReadString('\n')
 	//Split input into an array of strings
