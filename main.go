@@ -119,6 +119,7 @@ func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
 		log.Error("failed to delete bridge", "error", err)
 	}
 	delete(bridges, bridge.ID())
+	delete(callTypes, bridge.ID())
 
 	//TODO: make sure that the other participant gets kicked out of the call
 	//Should I destroy the channels?
