@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CyCoreSystems/ari/v5"
@@ -12,13 +13,17 @@ import (
 	"github.com/inconshreveable/log15"
 )
 
-var (
-	log = log15.New()
+type ctype struct {
+	mu    sync.Mutex
+	types map[string]string
+}
 
-	bridges       = make(map[string]*ari.BridgeHandle)  //Map bridgeID to the bridge itself
-	callTypes     = make(map[string]string)             //Map bridgeID to the call type (call, conference)
-	chanEndpoints = make(map[string]string)             //Map channelID to the endpoint (just for more simple listing of call info, not neccessary at all)
-	channels      = make(map[string]*ari.ChannelHandle) //Map channelID to the channel itself
+var (
+	log           = log15.New()
+	bridges       = make(map[string]*ari.BridgeHandle)    //Map bridgeID to the bridge itself
+	chanEndpoints = make(map[string]string)               //Map channelID to the endpoint (just for more simple listing of call info, not neccessary at all)
+	channels      = make(map[string]*ari.ChannelHandle)   //Map channelID to the channel itself
+	callTypes     = ctype{types: make(map[string]string)} //Map bridgeID to the call type (call, conference
 )
 
 func main() {
@@ -56,12 +61,26 @@ func main() {
 
 }
 
-func updateCallType(bridgeID string) {
-	bridge := bridges[bridgeID]
-	bridgeData, _ := bridge.Data()
+func getCallType(bridgeID string) string {
+	callTypes.mu.Lock()
+	defer callTypes.mu.Unlock()
 
+	return callTypes.types[bridgeID]
+}
+
+func updateCallType(bridgeID string) {
+	callTypes.mu.Lock()
+	defer callTypes.mu.Unlock()
+
+	bridge := bridges[bridgeID]
+	if bridge == nil {
+		log.Error("no bridge")
+		return
+	}
+
+	bridgeData, _ := bridge.Data()
 	if len(bridgeData.ChannelIDs) > 2 {
-		callTypes[bridge.ID()] = "conference"
+		callTypes.types[bridge.ID()] = "conference"
 	}
 }
 
@@ -73,7 +92,7 @@ func ListCalls() {
 
 	for _, bridge := range bridges {
 		bridgeData, _ := bridge.Data()
-		log.Info("CALL DATA", "bridge ID", bridgeData.ID, "call type", callTypes[bridge.ID()])
+		log.Info("CALL DATA", "bridge ID", bridgeData.ID, "call type", callTypes.types[bridge.ID()])
 		for _, channelID := range bridgeData.ChannelIDs {
 			//I like nested for loops what you gonna do?
 			log.Info("Channel info", "endpoint", chanEndpoints[channelID], "channel ID", channelID)
@@ -82,17 +101,11 @@ func ListCalls() {
 }
 
 func Dialer(cl ari.Client, args []string) {
-	var callType string
 
 	if len(args) < 2 {
 		log.Warn("at least two endpoints required")
 	} else {
-		if len(args) == 2 {
-			callType = "call"
-		} else {
-			callType = "conference"
-		}
-		bridge := createBridge(cl, callType)
+		bridge := createBridge(cl, len(args))
 		if bridge == nil {
 			log.Error("failed to create bridge")
 			return
@@ -102,13 +115,11 @@ func Dialer(cl ari.Client, args []string) {
 			log.Error("failed to add endpoints", "error", err)
 		}
 
-		go manageCall(cl, bridge, callTypes[bridge.ID()])
+		go manageCall(cl, bridge)
 	}
 }
 
-func manageCall(cl ari.Client, bridge *ari.BridgeHandle, callType string) {
-	defer bridge.Delete()
-
+func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
 	sub := bridge.Subscribe(ari.Events.ChannelLeftBridge)
 
 	e := <-sub.Events()
@@ -119,11 +130,11 @@ func manageCall(cl ari.Client, bridge *ari.BridgeHandle, callType string) {
 		log.Error("failed to play leave sound", "error", err)
 	}
 
-	// if err := channels[channelID].Hangup(); err != nil {
-	// 	log.Debug("failed to delete channel", "error", err)
-	// }
 	log.Debug("destroying channel", "channelID", channelID)
 	delete(channels, channelID)
+	delete(chanEndpoints, channelID)
+
+	callType := getCallType(bridge.ID())
 
 	if callType == "call" {
 		if err := bridge.Delete(); err != nil {
@@ -132,10 +143,8 @@ func manageCall(cl ari.Client, bridge *ari.BridgeHandle, callType string) {
 		log.Debug("destroying bridge")
 
 		delete(bridges, bridge.ID())
-		delete(callTypes, bridge.ID())
+		delete(callTypes.types, bridge.ID())
 	}
-	//TODO: make sure that the other participant gets kicked out of the call
-	//Should I destroy the channels?
 }
 
 func JoinBridge(cl ari.Client, bridgeID string, ext []string) error {
@@ -197,7 +206,15 @@ func createChannel(cl ari.Client, ext string) (*ari.ChannelHandle, error) {
 	return channel, nil
 }
 
-func createBridge(cl ari.Client, callType string) *ari.BridgeHandle {
+func createBridge(cl ari.Client, numberOfChannels int) *ari.BridgeHandle {
+	var callType string
+
+	if numberOfChannels == 2 {
+		callType = "call"
+	} else {
+		callType = "conference"
+	}
+
 	bridge, err := cl.Bridge().Create(&ari.Key{}, "mixing", "")
 	if err != nil {
 		log.Error("failed to create bridge", "error", err)
@@ -205,7 +222,7 @@ func createBridge(cl ari.Client, callType string) *ari.BridgeHandle {
 	}
 
 	bridges[bridge.ID()] = bridge
-	callTypes[bridge.ID()] = callType
+	callTypes.types[bridge.ID()] = callType
 	return bridge
 }
 
