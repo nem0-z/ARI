@@ -15,9 +15,10 @@ import (
 var (
 	log = log15.New()
 
-	bridges   = make(map[string]*ari.BridgeHandle) //Map bridgeID to the bridge itself
-	callTypes = make(map[string]string)            //Map bridgeID to the call type (call, conference)
-	channels  = make(map[string]string)            //Map channelID to the endpoint
+	bridges       = make(map[string]*ari.BridgeHandle)  //Map bridgeID to the bridge itself
+	callTypes     = make(map[string]string)             //Map bridgeID to the call type (call, conference)
+	chanEndpoints = make(map[string]string)             //Map channelID to the endpoint
+	channels      = make(map[string]*ari.ChannelHandle) //Map channelID to the channel itself
 )
 
 func main() {
@@ -43,6 +44,7 @@ func main() {
 		case "JoinCall":
 			if err := JoinBridge(cl, args[0], args[1:]); err != nil {
 				log.Error("failed to join bridge", "error", err)
+				continue
 			}
 			updateCallType(args[0])
 		case "ListCalls":
@@ -74,7 +76,7 @@ func ListCalls() {
 		log.Info("CALL DATA", "bridgeID", bridgeData.ID)
 		for _, channelID := range bridgeData.ChannelIDs {
 			//I like nested for loops what you gonna do?
-			log.Info("Channel ID: ", "channelID", channels[channelID])
+			log.Info("Channel ID: ", "channelID", chanEndpoints[channelID])
 		}
 	}
 }
@@ -114,12 +116,25 @@ func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
 		log.Error("failed to play leave sound", "error", err)
 	}
 
+	log.Debug("destroying channels")
+	data, _ := bridge.Data()
+	chs := data.ChannelIDs
+	for _, channelID := range chs {
+		if err := channels[channelID].Hangup(); err != nil {
+			log.Debug("failed to delete channel", "error", err)
+			return
+		}
+		delete(channels, channelID)
+	}
+
 	log.Debug("destroying bridge")
 	if err := bridge.Delete(); err != nil {
 		log.Error("failed to delete bridge", "error", err)
 	}
+
 	delete(bridges, bridge.ID())
 	delete(callTypes, bridge.ID())
+
 	//TODO: make sure that the other participant gets kicked out of the call
 	//Should I destroy the channels?
 }
@@ -178,7 +193,8 @@ func createChannel(cl ari.Client, ext string) (*ari.ChannelHandle, error) {
 		return nil, err
 	}
 
-	channels[channel.ID()] = "PJSIP/" + ext
+	chanEndpoints[channel.ID()] = "PJSIP/" + ext
+	channels[channel.ID()] = channel
 	return channel, nil
 }
 
