@@ -17,7 +17,7 @@ var (
 
 	bridges       = make(map[string]*ari.BridgeHandle)  //Map bridgeID to the bridge itself
 	callTypes     = make(map[string]string)             //Map bridgeID to the call type (call, conference)
-	chanEndpoints = make(map[string]string)             //Map channelID to the endpoint
+	chanEndpoints = make(map[string]string)             //Map channelID to the endpoint (just for more simple listing of call info, not neccessary at all)
 	channels      = make(map[string]*ari.ChannelHandle) //Map channelID to the channel itself
 )
 
@@ -73,10 +73,10 @@ func ListCalls() {
 
 	for _, bridge := range bridges {
 		bridgeData, _ := bridge.Data()
-		log.Info("CALL DATA", "bridgeID", bridgeData.ID)
+		log.Info("CALL DATA", "bridge ID", bridgeData.ID, "call type", callTypes[bridge.ID()])
 		for _, channelID := range bridgeData.ChannelIDs {
 			//I like nested for loops what you gonna do?
-			log.Info("Channel ID: ", "channelID", chanEndpoints[channelID])
+			log.Info("Channel info", "endpoint", chanEndpoints[channelID], "channel ID", channelID)
 		}
 	}
 }
@@ -102,39 +102,38 @@ func Dialer(cl ari.Client, args []string) {
 			log.Error("failed to add endpoints", "error", err)
 		}
 
-		if callTypes[bridge.ID()] == "call" {
-			go manageCall(cl, bridge)
-		}
+		go manageCall(cl, bridge, callTypes[bridge.ID()])
 	}
 }
 
-func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
-	sub := cl.Bus().Subscribe(nil, "StasisEnd")
-	<-sub.Events()
+func manageCall(cl ari.Client, bridge *ari.BridgeHandle, callType string) {
+	defer bridge.Delete()
+
+	sub := bridge.Subscribe(ari.Events.ChannelLeftBridge)
+
+	e := <-sub.Events()
+	v := e.(*ari.ChannelLeftBridge)
+	channelID := v.Channel.ID
 
 	if _, err := bridge.Play(bridge.ID(), "sound:confbridge-leave"); err != nil {
 		log.Error("failed to play leave sound", "error", err)
 	}
 
-	log.Debug("destroying channels")
-	data, _ := bridge.Data()
-	chs := data.ChannelIDs
-	for _, channelID := range chs {
-		if err := channels[channelID].Hangup(); err != nil {
-			log.Debug("failed to delete channel", "error", err)
-			return
+	// if err := channels[channelID].Hangup(); err != nil {
+	// 	log.Debug("failed to delete channel", "error", err)
+	// }
+	log.Debug("destroying channel", "channelID", channelID)
+	delete(channels, channelID)
+
+	if callType == "call" {
+		if err := bridge.Delete(); err != nil {
+			log.Error("failed to delete bridge", "error", err)
 		}
-		delete(channels, channelID)
+		log.Debug("destroying bridge")
+
+		delete(bridges, bridge.ID())
+		delete(callTypes, bridge.ID())
 	}
-
-	log.Debug("destroying bridge")
-	if err := bridge.Delete(); err != nil {
-		log.Error("failed to delete bridge", "error", err)
-	}
-
-	delete(bridges, bridge.ID())
-	delete(callTypes, bridge.ID())
-
 	//TODO: make sure that the other participant gets kicked out of the call
 	//Should I destroy the channels?
 }
