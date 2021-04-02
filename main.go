@@ -147,6 +147,10 @@ func originate(cl ari.Client, bridge *ari.BridgeHandle, ch string) error {
 		return err
 	}
 
+	if isChannelInBridge(bridge.ID(), ch) {
+		return errors.New("channel already in bridge")
+	}
+
 	if err := channel.Dial("ARI", 10*time.Second); err != nil {
 		log.Error("dial failed", "error", err)
 		return err
@@ -282,6 +286,20 @@ func ListCalls() {
 		}
 		printChannels(bridge.ID(), chans)
 	}
+}
+
+//Checks if the channel is already in a bridge.
+func isChannelInBridge(bridgeID string, ch string) bool {
+	endpoint := "PJSIP/" + ch
+	channels, _ := getChannelsFromBridge(bridgeID)
+
+	for _, channelInBridge := range channels {
+		if chanEndpoints[channelInBridge] == endpoint {
+			return true
+		}
+	}
+
+	return false
 }
 
 //Prompts user for a console input and returns it in a form of action and array of arguments.
