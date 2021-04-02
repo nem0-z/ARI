@@ -100,7 +100,7 @@ func manageCall(cl ari.Client, bridge *ari.BridgeHandle) {
 		numberOfChannels := len(chans)
 		callType := safeGetCallType(bridge.ID())
 
-		if callType == "call" || numberOfChannels < 2 {
+		if callType == "call" || numberOfChannels < 1 {
 			destroyRemainingChannels(bridge)
 
 			if err := bridge.Delete(); err != nil {
