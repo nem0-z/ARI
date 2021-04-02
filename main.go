@@ -42,6 +42,10 @@ func main() {
 		case "Dial":
 			Dialer(cl, args)
 		case "JoinCall":
+			if len(args) < 2 {
+				log.Warn("too few arguments")
+				continue
+			}
 			if err := JoinBridge(cl, args[0], args[1:]); err != nil {
 				log.Error("failed to join bridge", "error", err)
 				continue
@@ -127,16 +131,13 @@ func addEndpoints(cl ari.Client, bridge *ari.BridgeHandle, exts []string) error 
 
 //Wrapper for addEndpoints that uses bridgeID as an identifier instead of bridge handle itself.
 func JoinBridge(cl ari.Client, bridgeID string, ext []string) error {
-	bridge := bridges[bridgeID]
-	if bridge == nil {
-		return errors.New("this bridge does not exist")
+	if bridge, ok := bridges[bridgeID]; ok {
+		if err := addEndpoints(cl, bridge, ext); err != nil {
+			return err
+		}
+		return nil
 	}
-
-	if err := addEndpoints(cl, bridge, ext); err != nil {
-		return err
-	}
-
-	return nil
+	return errors.New("this bridge does not exist")
 }
 
 //Creates a channel, dials it and adds it to the bridge.
@@ -229,15 +230,14 @@ func deleteBridgeFromMaps(bridgeID string) {
 
 //Returns array of channel ids from the bridge identified by bridgeID.
 func getChannelsFromBridge(bridgeID string) ([]string, error) {
-	bridge := bridges[bridgeID]
-	if bridge == nil {
-		return nil, errors.New("non existing bridge")
+	if bridge, ok := bridges[bridgeID]; ok {
+		bridgeData, err := bridge.Data()
+		if err != nil {
+			return nil, errors.New("could not fetch bridge data")
+		}
+		return bridgeData.ChannelIDs, nil
 	}
-	bridgeData, err := bridge.Data()
-	if err != nil {
-		return nil, errors.New("could not fetch bridge data")
-	}
-	return bridgeData.ChannelIDs, nil
+	return nil, errors.New("this bridge does not exist")
 }
 
 //Returns call type for the bridge identified by bridgeID. Locks the access during the reading.
