@@ -162,6 +162,10 @@ func originate(cl ari.Client, bridge *ari.BridgeHandle, ch string) error {
 		return err
 	}
 
+	if _, err := bridge.Play(bridge.ID(), "sound:confbridge-join"); err != nil {
+		log.Error("failed to play join sound", "error", err)
+	}
+
 	return nil
 }
 
